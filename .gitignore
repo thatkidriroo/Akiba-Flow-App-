@@ -53,6 +53,9 @@ app.*.map.json
 pubspec.lock
 android/build/
 
+# Firebase
+android/app/google-services.json
+
 # Other projects kept locally
 .agents/
 financial-dashboard/

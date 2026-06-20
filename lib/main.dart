@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'services/supabase_config.dart';
+import 'services/firebase_config.dart';
 import 'providers/dashboard_provider.dart';
 import 'providers/auth_provider.dart';
 import 'theme/app_theme.dart';
@@ -12,10 +13,13 @@ import 'ui/screens/dashboard_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await Supabase.initialize(
-    url: SupabaseConfig.url,
-    publishableKey: SupabaseConfig.publishableKey,
-  );
+  await Future.wait([
+    Supabase.initialize(
+      url: SupabaseConfig.url,
+      publishableKey: SupabaseConfig.publishableKey,
+    ),
+    FirebaseConfig.initialize(),
+  ]);
 
   runApp(
     MultiProvider(
@@ -59,12 +63,6 @@ class _AuthGate extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer2<AuthProvider, DashboardProvider>(
       builder: (context, auth, prov, _) {
-        if (auth.status == AuthStatus.uninitialized || auth.status == AuthStatus.loading) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
-        }
-
         if (!auth.isSignedIn) {
           return AuthScreen(onSignIn: () {});
         }

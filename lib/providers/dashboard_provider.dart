@@ -3,11 +3,13 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
+import 'package:firebase_auth/firebase_auth.dart' as fb;
 import '../data/models/currency.dart';
 import '../data/models/transaction.dart';
 import '../data/models/opportunity.dart';
 import '../data/models/profile.dart';
 import '../data/seed_data.dart';
+import '../services/firestore_service.dart';
 import '../theme/app_theme.dart';
 
 const _blankProfile = Profile(
@@ -38,6 +40,7 @@ const _blankProfile = Profile(
 
 class DashboardProvider extends ChangeNotifier {
   final SupabaseClient _supabase = Supabase.instance.client;
+  final FirestoreService _firestore = FirestoreService();
 
   Profile _profile = _blankProfile;
   List<Transaction> _transactions = [];
@@ -69,6 +72,9 @@ class DashboardProvider extends ChangeNotifier {
   String get oppFilter => _oppFilter;
 
   ThemeTokens get themeTokens => ThemeTokens(isDark: _isDark);
+
+  String? get _userId =>
+      _supabase.auth.currentUser?.id ?? fb.FirebaseAuth.instance.currentUser?.uid;
 
   String get anonymousId {
     if (_profile.anonymousId == null) {
@@ -351,8 +357,8 @@ class DashboardProvider extends ChangeNotifier {
   }
 
   Future<void> saveTx(Transaction tx) async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
 
     if (tx.id != 0) {
       await _supabase
@@ -365,13 +371,13 @@ class DashboardProvider extends ChangeNotifier {
             'category': tx.category,
           })
           .eq('id', tx.id)
-          .eq('user_id', user.id);
+          .eq('user_id', uid);
       _transactions = _transactions.map((t) => t.id == tx.id ? tx : t).toList();
     } else {
       final response = await _supabase
           .from('transactions')
           .insert({
-            'user_id': user.id,
+            'user_id': uid,
             'type': tx.type,
             'label': tx.label,
             'amount': tx.amount,
@@ -383,6 +389,17 @@ class DashboardProvider extends ChangeNotifier {
       final newId = response['id'] as int;
       _transactions = [..._transactions, tx.copyWith(id: newId)];
     }
+
+    try {
+      await _firestore.addTransaction(uid, {
+        'type': tx.type,
+        'label': tx.label,
+        'amount': tx.amount,
+        'date': tx.date,
+        'category': tx.category,
+      });
+    } catch (_) {}
+
     _newTx = null;
     _editingTx = null;
     _recalculateScore();
@@ -391,15 +408,20 @@ class DashboardProvider extends ChangeNotifier {
   }
 
   Future<void> deleteTx(int id) async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
 
     await _supabase
         .from('transactions')
         .delete()
         .eq('id', id)
-        .eq('user_id', user.id);
+        .eq('user_id', uid);
     _transactions = _transactions.where((t) => t.id != id).toList();
+
+    try {
+      await _firestore.deleteTransaction(id.toString());
+    } catch (_) {}
+
     _recalculateScore();
     _updateScoreInSupabase();
     notifyListeners();
@@ -420,17 +442,17 @@ class DashboardProvider extends ChangeNotifier {
 
   Future<void> init() async {
     if (_loading) return;
-    final user = _supabase.auth.currentUser;
-    if (_loadedUserId == user?.id) return;
+    final uid = _userId;
+    if (_loadedUserId == uid) return;
     _loading = true;
-    _loadedUserId = user?.id;
+    _loadedUserId = uid;
 
-    if (user != null) {
+    if (uid != null) {
       _loadingProfile = true;
       notifyListeners();
       try {
-        await _loadProfile(user.id);
-        await _loadTransactions(user.id);
+        await _loadProfile(uid);
+        await _loadTransactions(uid);
         _recalculateScore();
       } catch (e) {
         debugPrint('[AkibaFlow] init load failed: $e');
@@ -443,8 +465,8 @@ class DashboardProvider extends ChangeNotifier {
   }
 
   Future<void> reloadAfterSignIn() async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
 
     _loadingProfile = true;
     notifyListeners();
@@ -453,8 +475,8 @@ class DashboardProvider extends ChangeNotifier {
     _profile = _blankProfile.copyWith(anonymousId: null);
     _loadedUserId = null;
 
-    await _loadProfile(user.id);
-    await _loadTransactions(user.id);
+    await _loadProfile(uid);
+    await _loadTransactions(uid);
     _recalculateScore();
 
     if (_profile.anonymousId == null) {
@@ -462,7 +484,7 @@ class DashboardProvider extends ChangeNotifier {
     }
 
     _loadingProfile = false;
-    _loadedUserId = user.id;
+    _loadedUserId = uid;
     notifyListeners();
   }
 
@@ -553,50 +575,63 @@ class DashboardProvider extends ChangeNotifier {
   }
 
   Future<void> _syncProfileToSupabase() async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
+
+    final profileData = {
+      'name': _profile.name,
+      'phone': _profile.phone,
+      'country': _profile.country,
+      'city': _profile.city,
+      'occupation': _profile.occupation,
+      'anonymous_id': _profile.anonymousId,
+      'is_onboarded': _profile.isOnboarded,
+      'is_dark': _isDark,
+      'currency_code': _currency.code,
+      'score': _profile.score,
+      'tier': _profile.tier,
+    };
 
     try {
-      await _supabase.from('profiles').upsert({
-        'id': user.id,
-        'name': _profile.name,
-        'phone': _profile.phone,
-        'country': _profile.country,
-        'city': _profile.city,
-        'occupation': _profile.occupation,
-        'anonymous_id': _profile.anonymousId,
-        'is_onboarded': _profile.isOnboarded,
-        'is_dark': _isDark,
-        'currency_code': _currency.code,
-        'score': _profile.score,
-        'tier': _profile.tier,
-      });
+      await _supabase.from('profiles').upsert({'id': uid, ...profileData});
     } catch (e) {
       debugPrint('[AkibaFlow] _syncProfileToSupabase failed: $e');
     }
+
+    try {
+      await _firestore.setProfile(uid, profileData);
+    } catch (_) {}
   }
 
   Future<void> _saveProfileField(String field, dynamic value) async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
 
     try {
       await _supabase
           .from('profiles')
           .update({field: value})
-          .eq('id', user.id);
+          .eq('id', uid);
+    } catch (_) {}
+
+    try {
+      await _firestore.updateProfileField(uid, field, value);
     } catch (_) {}
   }
 
   Future<void> _updateScoreInSupabase() async {
-    final user = _supabase.auth.currentUser;
-    if (user == null) return;
+    final uid = _userId;
+    if (uid == null) return;
 
     try {
       await _supabase
           .from('profiles')
           .update({'score': _profile.score, 'tier': _profile.tier})
-          .eq('id', user.id);
+          .eq('id', uid);
+    } catch (_) {}
+
+    try {
+      await _firestore.setProfile(uid, {'score': _profile.score, 'tier': _profile.tier});
     } catch (_) {}
   }
 
